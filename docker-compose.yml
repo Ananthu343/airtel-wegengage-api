@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  webhook-service:
+    build: .
+    environment:
+      - NODE_ENV=production
+      - PORT=5000
+      - MONGO_URL=mongodb://admin:E64vex&HKdJg4cnIouZTqW@167.71.231.94:27028/
+      - REDIS_URL=redis://redis:6379
+      - SUPER_ADMIN_DB=super_admin
+      - RESELLER_DB=_reseller
+      - SESSION_COLLECTION=_sessions
+      - LIVE_CHAT_COLLECTION=_chats
+    ports:
+      - "3000:5000"
+    deploy:
+      replicas: 4
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    depends_on:
+      - redis
+
+  redis:
+    image: redis/redis-stack-server:latest
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  redis_data:
