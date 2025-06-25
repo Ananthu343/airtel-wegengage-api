@@ -112,19 +112,29 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
         console.log("chat message converted!");
         
         
+        // let messageRequestId, error;
+        // try {
+        //     const response = await axios.post(process.env.SEND_MESSAGE_API, apiMessage, {
+        //         headers: {
+        //             "Content-Type": "application/json",
+        //             Authorization: `Basic ${Buffer.from(`${process.env.API_USERNAME}:${process.env.API_PASSWORD}`).toString("base64")}`
+        //         },
+        //         timeout: 5000
+        //     });
+        //     messageRequestId = response.data?.messageRequestId;
+        // } catch (err) {
+        //     error = {
+        //         title: err?.response?.data?.message || err?.message,
+        //         code: err?.response?.data?.code || null,
+        //     };
+        // }
         let messageRequestId, error;
         try {
-            const response = await axios.post(process.env.SEND_MESSAGE_API, apiMessage, {
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Basic ${Buffer.from(`${process.env.API_USERNAME}:${process.env.API_PASSWORD}`).toString("base64")}`
-                },
-                timeout: 5000
-            });
+            const response = await simulateMessageSend(apiMessage)
             messageRequestId = response.data?.messageRequestId;
         } catch (err) {
             error = {
-                title: err?.response?.data?.message || err?.message,
+                title: err?.response?.data?.message || err?.message || "",
                 code: err?.response?.data?.code || null,
             };
         }
