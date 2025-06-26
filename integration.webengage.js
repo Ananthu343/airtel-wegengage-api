@@ -123,7 +123,9 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
         
         
         let messageRequestId, error;
+        let apiStartTime, apiEndTime, apiResponseTime;
         try {
+            apiStartTime = Date.now(); 
             const response = await axios.post(process.env.SEND_MESSAGE_API, apiMessage, {
                 headers: {
                     "Content-Type": "application/json",
@@ -131,8 +133,13 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
                 },
                 // timeout: 5000
             });
+            apiEndTime = Date.now(); 
+            apiResponseTime = apiEndTime - apiStartTime; 
+
             messageRequestId = response.data?.messageRequestId;
         } catch (err) {
+            apiEndTime = Date.now(); 
+            apiResponseTime = apiEndTime - apiStartTime;
             error = {
                 title: err?.response?.data?.message || err?.message || "Message undelivered!",
                 code: err?.response?.data?.code || null,
@@ -151,7 +158,7 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
         //         code: err?.response?.data?.code || null,
         //     };
         // }
-        console.log("Airtel api processed sucessfully, error:", error);
+        console.log("Airtel api processed sucessfully, error:", error, `response time: ${apiResponseTime} ms`);
         
         return {
             savedError: error,
