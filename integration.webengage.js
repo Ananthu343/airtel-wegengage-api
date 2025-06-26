@@ -46,6 +46,8 @@ function isValidObjectId(id) {
 
 exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
     console.log("Processing handlewebengage");
+    const timestamp = data?.metadata?.timestamp;
+    const messageId = data?.metadata?.messageId;
     
     try {
         const db = dbConnection.db(
@@ -58,7 +60,9 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
             return {
                 error: {
                     code: "UNAUTHORIZED",
-                    message: "User not found"
+                    message: "User not found",
+                    timestamp,
+                    messageId
                 }
             };
         };
@@ -76,7 +80,9 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
             return {
                 error: {
                     code: "TEMPLATE_NOT_FOUND",
-                    message: "Template not found in collection"
+                    message: "Template not found in collection",
+                    timestamp,
+                    messageId
                 }
             };
         };
@@ -85,7 +91,9 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
             return {
                 error: {
                     code: "UNAUTHORIZED",
-                    message: "User not found"
+                    message: "User not found",
+                    timestamp,
+                    messageId
                 }
             };
         };
@@ -101,7 +109,9 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
             return {
                 error: {
                     code: "INSUFFICIENT_BALANCE",
-                    message: "User has insufficient balance"
+                    message: "User has insufficient balance",
+                    timestamp,
+                    messageId
                 }
             };
         }
@@ -126,6 +136,8 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
         //     error = {
         //         title: err?.response?.data?.message || err?.message,
         //         code: err?.response?.data?.code || null,
+        //         timestamp,
+        //         messageId
         //     };
         // }
         let messageRequestId, error;

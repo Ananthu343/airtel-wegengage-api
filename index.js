@@ -3,36 +3,94 @@ const { MongoClient, ObjectId } = require('mongodb');
 const { handleWebengage } = require('./integration.webengage');
 const { createClient } = require('redis');
 const os = require('os');
+const cluster = require('cluster');
+const numCPUs = require('os').cpus().length;
+const axios = require('axios');
+const { notifyWebengageError, processDbUpdates } = require('./utils');
 require('dotenv').config();
 
 const PORT = 3000;
-const WORKER_ID = process.env.HOSTNAME || `worker-${os.hostname()}`;
+const WORKER_ID = process.env.HOSTNAME || `worker-${os.hostname()}-${process.pid}`;
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 const DB_UPDATE_BATCH_SIZE = 50;
 const DB_UPDATE_INTERVAL_MS = 1000;
-const QUEUE_NAME = `db_updates_${WORKER_ID}`;
+const QUEUE_NAME = `webengage_requests`;
+const PROCESSING_QUEUE_NAME = `processing_${WORKER_ID}`;
 
-const redisClient = createClient({
-    url: REDIS_URL,
-    socket: {
-        reconnectStrategy: (retries) => Math.min(retries * 100, 5000)
+// Initialize Redis client
+function createRedisClient() {
+    const client = createClient({
+        url: REDIS_URL,
+        socket: {
+            reconnectStrategy: (retries) => Math.min(retries * 100, 5000)
+        }
+    });
+    
+    client.on('error', (err) => console.error('Redis error:', err));
+    client.on('ready', () => console.log('Redis connected'));
+    
+    return client;
+}
+
+// Validation function for incoming requests
+function validateWebengageRequest(req) {
+    const { id, under } = req.params
+    const body = req.body;
+
+    if (!id || !under) {
+        return { valid: false, error: 'Required params not found' };
     }
-});
 
-redisClient.on('error', (err) => {
-    console.error('Redis error:', err);
-});
+    if (!body) {
+        return { valid: false, error: 'Request body is missing' };
+    }
 
-redisClient.on('ready', () => {
-    console.log('Redis connected for DB updates');
-});
+    if (!body.whatsAppData || !body.whatsAppData.toNumber) {
+        return { valid: false, error: 'Recipient phone number is required' };
+    }
 
-async function startServer() {
+    if (!body.whatsAppData.templateData || !body.whatsAppData.templateData.templateName) {
+        return { valid: false, error: 'Template name is required' };
+    }
+
+    return { valid: true };
+}
+
+// Worker function to process queue items
+async function processQueueItem(item, dbConnection) {
     try {
-        await redisClient.connect();
+        const result = await handleWebengage(item, dbConnection);
+
+        if (result?.error) {
+            await notifyWebengageError(item, result.error, dbConnection);
+            return { success: true };
+        }
+
+        // Process DB updates directly (no longer using separate queue)
+        if (result.dbOps) {
+            await processDbUpdates([result.dbOps], dbConnection, WORKER_ID);
+        }
+
+        // If there was an error during message sending, notify WebEngage
+        if (result?.savedError) {
+            await notifyWebengageError(item, result.savedError, dbConnection);
+        }
+
+        return { success: true };
+    } catch (error) {
+        console.error('Error processing queue item:', error);
+        return { success: false, error };
+    }
+}
+
+// Worker process function
+async function workerProcess() {
+    try {
+        const workerRedis = createRedisClient();
+        await workerRedis.connect();
 
         const mongoClient = new MongoClient(process.env.MONGO_URL, {
-            maxPoolSize: 100,
+            maxPoolSize: 50,
             connectTimeoutMS: 30000,
             socketTimeoutMS: 60000,
             retryWrites: true,
@@ -41,200 +99,131 @@ async function startServer() {
         });
 
         const dbConnection = await mongoClient.connect();
-        console.log("DB connected");
+        console.log(`Worker ${WORKER_ID} connected to DB`);
 
-        const app = express();
-
-        app.use(express.json({ limit: '100kb' }));
-        app.use(express.urlencoded({ extended: true, limit: '100kb' }));
-
-        app.post('/webhook/webengage/:under/:id', async (req, res) => {
+        // Process items from the queue
+        async function processNextItem() {
             try {
-                const { under, id } = req.params;
-                const content = {
-                    under,
-                    id,
-                    data: req.body,
-                    timestamp: new Date().toISOString()
-                };
+                // Simple but non-atomic approach for very old Redis versions
+                const item = await workerRedis.rPop(QUEUE_NAME);
 
-                const result = await handleWebengage(content, dbConnection);
-                console.log("Finished processing handlewebengage!");
+                if (item) {
+                    console.log(`${WORKER_ID} processing item`);
+                    try {
+                        const parsedItem = JSON.parse(item);
+                        const result = await processQueueItem(parsedItem, dbConnection);
 
-                if (result?.error) {
-                    console.log("Handling error response!");
-                    return handleErrorResponse(res, result.error);
+                        // if (!result.success) {
+                        //     // Requeue on failure
+                        //     await redisClient.rPush(QUEUE_NAME, item);
+                        //     console.log('Requeued failed item');
+                        // }
+                    } catch (parseErr) {
+                        console.error('Error parsing queue item:', parseErr);
+                    }
+                } else {
+                    // No items in queue, wait before checking again
+                    await new Promise(resolve => setTimeout(resolve, 1000));
                 }
 
-                console.log("pushing db operation into redis queue: ", QUEUE_NAME);
-                
-                await redisClient.rPush(QUEUE_NAME, JSON.stringify(result.dbOps));
-                console.log("Pushed !", QUEUE_NAME);
-
-                if (result?.savedError) {
-                    console.log("Saved error found !");
-                    return res.status(400).send({
-                        status: "whatsapp_rejected",
-                        statusCode: 2019,
-                        message: "The message format is invalid"
-                    });
-                }
-
-                return res.status(200).send({
-                    status: "whatsapp_accepted",
-                    statusCode: 0
-                });
-
+                // Continue processing next item
+                setImmediate(processNextItem);
             } catch (err) {
-                console.error('Webhook processing error:', err);
-                res.status(400).send({
-                    status: "whatsapp_rejected",
-                    statusCode: 2019,
-                    message: "The message format is invalid"
-                });
+                console.error('Error in worker processing loop:', err);
+                // Wait a bit before retrying
+                setTimeout(processNextItem, 1000);
             }
-        });
+        }
 
-        app.get('/health', async (req, res) => {
-            try {
-                await redisClient.ping();
-                res.status(200).json({
-                    status: 'healthy',
-                    worker: WORKER_ID,
-                    redis: 'connected',
-                    queue_name: QUEUE_NAME
-                });
-            } catch (err) {
-                res.status(500).json({
-                    status: 'unhealthy',
-                    worker: WORKER_ID,
-                    redis: 'disconnected'
-                });
-            }
-        });
-
-        setInterval(() => processDbUpdates(dbConnection), DB_UPDATE_INTERVAL_MS);
-
-        const server = app.listen(PORT, () => {
-            console.log(`🚀 Server (Worker ${WORKER_ID}) listening on port ${PORT}`);
-        });
-
-        process.on('SIGTERM', () => gracefulShutdown(server, dbConnection));
-        process.on('SIGINT', () => gracefulShutdown(server, dbConnection));
+        // Start processing
+        processNextItem();
 
     } catch (err) {
-        console.error("🔥 Server startup failed:", err);
+        console.error("Worker startup failed:", err);
         process.exit(1);
     }
 }
 
-function handleErrorResponse(res, error) {
-    console.log("Handling error response: ", error);
+// Master process function
+async function masterProcess() {
+    const masterRedis = createRedisClient();
+    await masterRedis.connect();
+    
+    const app = express();
 
-    switch (error.code) {
-        case "TEMPLATE_NOT_FOUND":
-            return res.status(400).send({
-                status: "whatsapp_rejected",
-                statusCode: 2023,
-                message: "Template did not match"
+    app.use(express.json({ limit: '100kb' }));
+    app.use(express.urlencoded({ extended: true, limit: '100kb' }));
+
+    app.post('/webhook/webengage/:under/:id', async (req, res) => {
+        try {
+            
+            // Validate request
+            const validation = validateWebengageRequest(req);
+            if (!validation.valid) {
+                return res.status(400).json({
+                    status: "whatsapp_rejected",
+                    statusCode: 2019,
+                    message: validation.error
+                });
+            }
+            
+            const { under, id } = req.params;
+            // Create queue item
+            const content = {
+                under,
+                id,
+                data: req.body,
+                timestamp: new Date().toISOString()
+            };
+
+            // Add to queue
+            await masterRedis.rPush(QUEUE_NAME, JSON.stringify(content));
+
+            // Respond immediately that request was accepted
+            return res.status(202).json({
+                status: "whatsapp_accepted",
+                statusCode: 0,
+                message: "Request queued for processing"
             });
-        case "INSUFFICIENT_BALANCE":
-            return res.status(200).send({
-                status: "whatsapp_rejected",
-                statusCode: 2000,
-                message: "Insufficient credit balance"
-            });
-        case "UNAUTHORIZED":
-            return res.status(403).send({
-                status: "whatsapp_rejected",
-                statusCode: 2005,
-                message: "Authorization failure - User not found"
-            });
-        case "INTERNAL_ERROR":
-        default:
-            return res.status(400).send({
+
+        } catch (err) {
+            console.error('Webhook processing error:', err);
+            res.status(400).json({
                 status: "whatsapp_rejected",
                 statusCode: 2019,
                 message: "The message format is invalid"
             });
-    }
+        }
+    });
+
+    app.get('/health', async (req, res) => {
+        try {
+            await masterRedis.ping();
+            res.status(200).json({
+                status: 'healthy',
+                workers: numCPUs,
+                redis: 'connected'
+            });
+        } catch (err) {
+            res.status(500).json({
+                status: 'unhealthy',
+                error: err.message
+            });
+        }
+    });
+
+    const server = app.listen(PORT, () => {
+        console.log(`🚀 Master server listening on port ${PORT}`);
+    });
+
+    process.on('SIGTERM', () => gracefulShutdown(server, masterRedis));
+    process.on('SIGINT', () => gracefulShutdown(server, masterRedis));
 }
 
-async function processDbUpdates(dbConnection) {
-    try {
-        const updates = await redisClient.lRange(QUEUE_NAME, 0, DB_UPDATE_BATCH_SIZE - 1);
-        if (updates.length === 0) return;
-        console.log("Processing db updation from queue: ", QUEUE_NAME);
-        
-        const batchStartTime = Date.now();
-
-        const parsedUpdates = updates.map(update => {
-            const obj = JSON.parse(update);
-            if (
-                obj?.sessionUpdate?.update?.$set?.lastMessageTime &&
-                typeof obj.sessionUpdate.update.$set.lastMessageTime === 'string'
-            ) {
-                obj.sessionUpdate.update.$set.lastMessageTime = new Date(obj.sessionUpdate.update.$set.lastMessageTime);
-            }
-            return obj;
-        });
-
-        const groupedUpdates = parsedUpdates.reduce((acc, update) => {
-            const dbName = update.under === "super_admin"
-                ? process.env.SUPER_ADMIN_DB
-                : update.under + process.env.RESELLER_DB;
-
-            if (!acc[dbName]) acc[dbName] = {
-                sessionUpdates: [],
-                liveChatInserts: []
-            };
-
-            if (update.sessionUpdate) {
-                acc[dbName].sessionUpdates.push({
-                    updateOne: {
-                        filter: update.sessionUpdate.filter,
-                        update: update.sessionUpdate.update,
-                        upsert: true
-                    }
-                });
-            }
-
-            if (update.liveChatInsert) {
-                acc[dbName].liveChatInserts.push(update.liveChatInsert);
-            }
-
-            return acc;
-        }, {});
-
-        await Promise.all(
-            Object.entries(groupedUpdates).map(async ([dbName, { sessionUpdates, liveChatInserts }]) => {
-                const db = dbConnection.db(dbName);
-                const collectionPrefix = parsedUpdates[0].id;
-
-                if (sessionUpdates.length > 0) {
-                    await db.collection(`${collectionPrefix}${process.env.SESSION_COLLECTION}`)
-                        .bulkWrite(sessionUpdates);
-                }
-
-                if (liveChatInserts.length > 0) {
-                    await db.collection(`${collectionPrefix}${process.env.LIVE_CHAT_COLLECTION}`)
-                        .insertMany(liveChatInserts);
-                }
-            })
-        );
-
-        await redisClient.lTrim(QUEUE_NAME, updates.length, -1);
-        console.log(`${WORKER_ID} processed ${updates.length} DB updates in ${Date.now() - batchStartTime}ms`);
-    } catch (err) {
-        console.error("DB update processing failed:", err);
-    }
-}
-
-async function gracefulShutdown(server, dbConnection) {
+async function gracefulShutdown(server, redisClient) {
     console.log('Received shutdown signal, closing gracefully...');
     try {
         await new Promise(resolve => server.close(resolve));
-        await dbConnection.close();
         await redisClient.quit();
         console.log('All connections closed');
         process.exit(0);
@@ -244,4 +233,31 @@ async function gracefulShutdown(server, dbConnection) {
     }
 }
 
-startServer();
+// Start the appropriate process
+if (cluster.isMaster) {
+    console.log(`Master ${process.pid} is running`);
+    console.log("Number of workers: ", numCPUs);
+    
+    // Fork workers
+    for (let i = 0; i < numCPUs; i++) {
+        cluster.fork();
+    }
+
+    cluster.on('exit', (worker, code, signal) => {
+        console.log(`Worker ${worker.process.pid} died`);
+        // Restart worker
+        cluster.fork();
+    });
+
+    // Start master process
+    masterProcess().catch(err => {
+        console.error('Master process failed:', err);
+        process.exit(1);
+    });
+} else {
+    // Start worker process
+    workerProcess().catch(err => {
+        console.error('Worker process failed:', err);
+        process.exit(1);
+    });
+}
