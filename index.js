@@ -12,7 +12,7 @@ require('dotenv').config();
 const PORT = 3000;
 const WORKER_ID = process.env.HOSTNAME || `worker-${os.hostname()}-${process.pid}`;
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
-const DB_UPDATE_BATCH_SIZE = 50;
+const DB_UPDATE_BATCH_SIZE = 70;
 const DB_UPDATE_INTERVAL_MS = 1000;
 const QUEUE_NAME = `webengage_requests`;
 const PROCESSING_QUEUE_NAME = `processing_${WORKER_ID}`;
@@ -84,6 +84,7 @@ async function processQueueItem(item, dbConnection) {
 }
 
 // Worker process function
+// Worker process function
 async function workerProcess() {
     try {
         const workerRedis = createRedisClient();
@@ -101,42 +102,59 @@ async function workerProcess() {
         const dbConnection = await mongoClient.connect();
         console.log(`Worker ${WORKER_ID} connected to DB`);
 
-        // Process items from the queue
-        async function processNextItem() {
+        // Process batch of items from the queue atomically
+        async function processBatch() {
             try {
-                // Simple but non-atomic approach for very old Redis versions
-                const item = await workerRedis.rPop(QUEUE_NAME);
-
-                if (item) {
-                    console.log(`${WORKER_ID} processing item`);
-                    try {
-                        const parsedItem = JSON.parse(item);
-                        const result = await processQueueItem(parsedItem, dbConnection);
-
-                        // if (!result.success) {
-                        //     // Requeue on failure
-                        //     await redisClient.rPush(QUEUE_NAME, item);
-                        //     console.log('Requeued failed item');
-                        // }
-                    } catch (parseErr) {
-                        console.error('Error parsing queue item:', parseErr);
-                    }
-                } else {
-                    // No items in queue, wait before checking again
-                    await new Promise(resolve => setTimeout(resolve, 1000));
+                const batch = [];
+                let item;
+                
+                // Collect up to 50 items using RPOP
+                while (batch.length < DB_UPDATE_BATCH_SIZE) {
+                    item = await workerRedis.rPop(QUEUE_NAME);
+                    if (!item) break; // Queue is empty
+                    batch.push(item);
                 }
 
-                // Continue processing next item
-                setImmediate(processNextItem);
+                if (batch.length === 0) {
+                    // Queue is empty, wait before checking again
+                    setTimeout(processBatch, 1000);
+                    return;
+                }
+
+                console.log(`${WORKER_ID} processing batch of ${batch.length} items`);
+
+                // Process items with limited concurrency
+                const processingResults = await Promise.allSettled(
+                    batch.map(item => {
+                        try {
+                            const parsedItem = JSON.parse(item);
+                            return processQueueItem(parsedItem, dbConnection);
+                        } catch (parseErr) {
+                            console.error('Error parsing queue item:', parseErr);
+                            return { success: false };
+                        }
+                    })
+                );
+
+                // Log batch processing results
+                const successes = processingResults.filter(r => r.value?.success).length;
+                console.log(`Batch processed - ${successes}/${batch.length} successful`);
+
+                // Process next batch immediately if we got a full batch
+                if (batch.length === DB_UPDATE_BATCH_SIZE) {
+                    setImmediate(processBatch);
+                } else {
+                    setTimeout(processBatch, 1000);
+                }
+
             } catch (err) {
-                console.error('Error in worker processing loop:', err);
-                // Wait a bit before retrying
-                setTimeout(processNextItem, 1000);
+                console.error('Error in batch processing:', err);
+                setTimeout(processBatch, 5000);
             }
         }
 
-        // Start processing
-        processNextItem();
+        // Start batch processing
+        processBatch();
 
     } catch (err) {
         console.error("Worker startup failed:", err);
