@@ -2,60 +2,60 @@ const { ObjectId } = require("mongodb");
 const axios = require('axios');
 
 const simulateMessageSend = async (apiMessage) => {
-  return new Promise((resolve, reject) => {
-    // Simulate network latency (50-300ms)
-    const delay = Math.floor(Math.random() * 250) + 50;
-    
-    setTimeout(() => {
-      // Simulate 95% success rate
-      if (Math.random() > 0.05) {
-        resolve({
-          data: {
-            messageRequestId: `sim-${Math.random().toString(36).substring(2, 10)}`,
-            status: "accepted"
-          }
-        });
-      } else {
-        // Simulate 5% failure rate with different error types
-        const errors = [
-          { message: "Invalid template", code: 400 },
-          { message: "Recipient blocked", code: 403 },
-          { message: "Service unavailable", code: 503 },
-          { message: "Timeout", code: 504 }
-        ];
-        const error = errors[Math.floor(Math.random() * errors.length)];
-        reject({ response: { data: error } });
-      }
-    }, delay);
-  });
+    return new Promise((resolve, reject) => {
+        // Simulate network latency (50-300ms)
+        const delay = Math.floor(Math.random() * 250) + 50;
+
+        setTimeout(() => {
+            // Simulate 95% success rate
+            if (Math.random() > 0.05) {
+                resolve({
+                    data: {
+                        messageRequestId: `sim-${Math.random().toString(36).substring(2, 10)}`,
+                        status: "accepted"
+                    }
+                });
+            } else {
+                // Simulate 5% failure rate with different error types
+                const errors = [
+                    { message: "Invalid template", code: 400 },
+                    { message: "Recipient blocked", code: 403 },
+                    { message: "Service unavailable", code: 503 },
+                    { message: "Timeout", code: 504 }
+                ];
+                const error = errors[Math.floor(Math.random() * errors.length)];
+                reject({ response: { data: error } });
+            }
+        }, delay);
+    });
 };
 
 function isValidObjectId(id) {
-  if (!id) return false;
-  
-  if (typeof id === 'string' && id.length === 24) {
-    return /^[0-9a-fA-F]{24}$/.test(id) && ObjectId.isValid(id);
-  }
-  
-  if (id instanceof ObjectId) {
-    return true;
-  }
-  
-  return false;
+    if (!id) return false;
+
+    if (typeof id === 'string' && id.length === 24) {
+        return /^[0-9a-fA-F]{24}$/.test(id) && ObjectId.isValid(id);
+    }
+
+    if (id instanceof ObjectId) {
+        return true;
+    }
+
+    return false;
 }
 
 exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
     console.log("Processing handlewebengage");
     const timestamp = data?.metadata?.timestamp;
     const messageId = data?.metadata?.messageId;
-    
+
     try {
         const db = dbConnection.db(
             under === "super_admin"
                 ? process.env.SUPER_ADMIN_DB
                 : under + process.env.RESELLER_DB
         );
-        if (!isValidObjectId(id)) {      
+        if (!isValidObjectId(id)) {
             console.log("Not a valid userId");
             return {
                 error: {
@@ -69,10 +69,22 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
         // Parallelize initial queries
         const [savedTemplate, user] = await Promise.all([
             db.collection(id + process.env.TEMPLATES_COLLECTION)
-            .findOne({ name: data?.whatsAppData?.templateData?.templateName || "" }),
+                .findOne({ name: data?.whatsAppData?.templateData?.templateName || "" }),
             db.collection("users")
-            .findOne({ _id: ObjectId.createFromHexString(id) })
+                .findOne({ _id: ObjectId.createFromHexString(id) })
         ]);
+
+        if (!user) {
+            console.log("User not found");
+            return {
+                error: {
+                    code: "UNAUTHORIZED",
+                    message: "User not found",
+                    timestamp,
+                    messageId
+                }
+            };
+        };
         
         // Validation checks
         if (!savedTemplate) {
@@ -86,46 +98,124 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
                 }
             };
         };
-        if (!user) {
-            console.log("User not found");
+        
+        // Process message
+        const apiMessage = buildApiMessage(savedTemplate.templateId, data, user);
+        const chatMessage = buildChatMessage(savedTemplate, data);
+        console.log("chat message converted!");
+        
+        if (savedTemplate?.status === "PAUSED") {
+            console.log("Template is paused");
             return {
-                error: {
-                    code: "UNAUTHORIZED",
-                    message: "User not found",
+                savedError: {
+                    code: "TEMPLATE_NOT_FOUND",
+                    message: "Template is Paused",
                     timestamp,
                     messageId
+                },
+                dbOps: {
+                    under,
+                    id,
+                    sessionUpdate: {
+                        filter: { contactNumber: chatMessage.to },
+                        update: {
+                            $set: {
+                                sentBy: "system",
+                                lastMessage: chatMessage.template.message,
+                                lastMessageType: chatMessage.template.headerType,
+                                lastMessageTime: new Date(),
+                                isBlocked: false,
+                                intervene: false
+                            },
+                            $setOnInsert: {
+                                utility: { id: null, expiration: null, cost: 0 },
+                                marketing: { id: null, expiration: null, cost: 0 },
+                                authentication: { id: null, expiration: null, cost: 0 },
+                                service: { id: null, expiration: null, cost: 0 }
+                            }
+                        }
+                    },
+                    liveChatInsert: {
+                        data: chatMessage,
+                        sentBy: "system",
+                        messageRequestId: "",
+                        messageId: "",
+                        timestamp: "",
+                        wamid: null,
+                        status:"failed",
+                        error : {
+                            title: "Template is Paused!",
+                            code: ""
+                        },
+                        erpType: "webengage",
+                        createdAt: new Date()
+                    }
                 }
             };
         };
 
         const pricing = await db
             .collection(`${id}${process.env.PRICING_COLLECTION}`)
-            .findOne({ dial_code: "91" }, { 
-                projection: { [savedTemplate.type.toLowerCase()]: 1 } 
+            .findOne({ dial_code: "91" }, {
+                projection: { [savedTemplate.type.toLowerCase()]: 1 }
             });
 
         if (user.balance < pricing[savedTemplate.type.toLowerCase()]) {
             console.log("Insufficient balance!");
             return {
-                error: {
+                savedError: {
                     code: "INSUFFICIENT_BALANCE",
                     message: "User has insufficient balance",
                     timestamp,
                     messageId
+                },
+                dbOps: {
+                    under,
+                    id,
+                    sessionUpdate: {
+                        filter: { contactNumber: chatMessage.to },
+                        update: {
+                            $set: {
+                                sentBy: "system",
+                                lastMessage: chatMessage.template.message,
+                                lastMessageType: chatMessage.template.headerType,
+                                lastMessageTime: new Date(),
+                                isBlocked: false,
+                                intervene: false
+                            },
+                            $setOnInsert: {
+                                utility: { id: null, expiration: null, cost: 0 },
+                                marketing: { id: null, expiration: null, cost: 0 },
+                                authentication: { id: null, expiration: null, cost: 0 },
+                                service: { id: null, expiration: null, cost: 0 }
+                            }
+                        }
+                    },
+                    liveChatInsert: {
+                        data: chatMessage,
+                        sentBy: "system",
+                        messageRequestId: "",
+                        messageId: "",
+                        timestamp: "",
+                        wamid: null,
+                        status:"failed",
+                        error : {
+                            title: "Message failed due to insufficient balance!",
+                            code: ""
+                        },
+                        erpType: "webengage",
+                        createdAt: new Date()
+                    }
                 }
             };
         }
 
-        // Process message
-        const apiMessage = buildApiMessage(savedTemplate.templateId, data, user);
-        const chatMessage = buildChatMessage(savedTemplate, data);
-        console.log("chat message converted!");
-        
-        
+
+
         let messageRequestId, error;
         let apiStartTime, apiEndTime, apiResponseTime;
         try {
-            apiStartTime = Date.now(); 
+            apiStartTime = Date.now();
             const response = await axios.post(process.env.SEND_MESSAGE_API, apiMessage, {
                 headers: {
                     "Content-Type": "application/json",
@@ -133,12 +223,12 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
                 },
                 // timeout: 5000
             });
-            apiEndTime = Date.now(); 
-            apiResponseTime = apiEndTime - apiStartTime; 
+            apiEndTime = Date.now();
+            apiResponseTime = apiEndTime - apiStartTime;
 
             messageRequestId = response.data?.messageRequestId;
         } catch (err) {
-            apiEndTime = Date.now(); 
+            apiEndTime = Date.now();
             apiResponseTime = apiEndTime - apiStartTime;
             error = {
                 title: err?.response?.data?.message || err?.message || "Message undelivered!",
@@ -159,7 +249,7 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
         //     };
         // }
         console.log("Airtel api processed sucessfully, error:", error, `response time: ${apiResponseTime} ms`);
-        
+
         return {
             savedError: error,
             messageRequestId,
@@ -199,7 +289,7 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
                 }
             }
         };
-        
+
     } catch (err) {
         console.log("Error in handling webengage", err);
         return {
@@ -210,6 +300,61 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
         };
     }
 };
+
+exports.fetchWhatsAppTemplate = async function ({ under, id, data }, dbConnection) {
+    try {
+        const url = 'https://iqwhatsapp.airtel.in/gateway/airtel-xchange/whatsapp-content-manager/v1/template';
+
+        const db = dbConnection.db(
+            under === "super_admin"
+                ? process.env.SUPER_ADMIN_DB
+                : under + process.env.RESELLER_DB)
+
+        const [savedTemplate, user] = await Promise.all([
+            db.collection(id + process.env.TEMPLATES_COLLECTION)
+                .findOne({ name: data?.whatsAppData?.templateData?.templateName || "" }),
+            db.collection("users")
+                .findOne({ _id: ObjectId.createFromHexString(id) })
+        ]);
+
+        const params = {
+            customerId: process.env.CUSTOMER_ID,
+            subAccountId: process.env.SUB_ACCOUNT_ID,
+            wabaId: user?.wabaId,
+            templateId: savedTemplate?.templateId
+        };
+
+        const headers = {
+            'Content-Type': 'application/json',
+            Authorization: `Basic ${Buffer.from(`${process.env.API_USERNAME}:${process.env.API_PASSWORD}`).toString("base64")}`
+        };
+
+        let response = await axios.get(url, {
+            params,
+            headers
+        });
+
+        response = response.data;
+
+        console.log(response.template.status, "template response");
+        if (response?.template?.status && response?.template?.status === "INACTIVE") {
+            await db.collection(id + process.env.TEMPLATES_COLLECTION)
+                .updateOne({ name: data?.whatsAppData?.templateData?.templateName }, { $set: { status: "PAUSED" } })
+        } else {
+            if (savedTemplate?.status === "PAUSED") {
+                await db.collection(id + process.env.TEMPLATES_COLLECTION)
+                    .updateOne({ name: data?.whatsAppData?.templateData?.templateName }, { $set: { status: "APPROVED" } })
+            }
+        }
+
+    } catch (error) {
+        console.error('Error fetching WhatsApp template:', error.message);
+        if (error.response) {
+            console.error('Response data:', error.response.data);
+            console.error('Status code:', error.response.status);
+        }
+    }
+}
 
 const buildApiMessage = (templateId, message, user) => {
     const whatsAppData = message.whatsAppData;

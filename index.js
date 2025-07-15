@@ -1,6 +1,6 @@
 const express = require('express');
 const { MongoClient, ObjectId } = require('mongodb');
-const { handleWebengage } = require('./integration.webengage');
+const { handleWebengage, fetchWhatsAppTemplate } = require('./integration.webengage');
 const { createClient } = require('redis');
 const os = require('os');
 const cluster = require('cluster');
@@ -123,6 +123,7 @@ async function workerProcess() {
 
                 console.log(`${WORKER_ID} processing batch of ${batch.length} items`);
 
+                await fetchWhatsAppTemplate(JSON.parse(batch[0]), dbConnection) //updating template status if paused for each batch 
                 // Process items with limited concurrency
                 const processingResults = await Promise.allSettled(
                     batch.map(item => {
@@ -139,7 +140,7 @@ async function workerProcess() {
                 // Log batch processing results
                 const successes = processingResults.filter(r => r.value?.success).length;
                 console.log(`Batch processed - ${successes}/${batch.length} successful`);
-
+                
                 // Process next batch immediately if we got a full batch
                 if (batch.length === DB_UPDATE_BATCH_SIZE) {
                     setImmediate(processBatch);

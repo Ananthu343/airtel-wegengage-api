@@ -18,7 +18,7 @@ function getErrorResponse(error) {
             return {
                 ...baseResponse,
                 statusCode: 2023,
-                message: "Template did not match"
+                // message: "Template did not match"
             };
         case "INSUFFICIENT_BALANCE":
             return {
