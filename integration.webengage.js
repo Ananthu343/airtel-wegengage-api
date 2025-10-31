@@ -85,7 +85,7 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
                 }
             };
         };
-        
+
         // Validation checks
         if (!savedTemplate) {
             console.log("Template not found");
@@ -98,12 +98,66 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
                 }
             };
         };
-        
+
+
         // Process message
         const apiMessage = buildApiMessage(savedTemplate.templateId, data, user);
         const chatMessage = buildChatMessage(savedTemplate, data);
         console.log("chat message converted!");
-        
+
+        if (user?.allowedTemplateTypes) {
+            // console.log("yo", savedTemplate, user);
+            
+            if (!user?.allowedTemplateTypes.includes(savedTemplate.type?.toLowerCase())) {
+                return {
+                    savedError: {
+                        code: "TEMPLATE_NOT_FOUND",
+                        message: "Template is not allowed to send",
+                        timestamp,
+                        messageId
+                    },
+                    dbOps: {
+                        under,
+                        id,
+                        sessionUpdate: {
+                            filter: { contactNumber: chatMessage.to },
+                            update: {
+                                $set: {
+                                    sentBy: "system",
+                                    lastMessage: chatMessage.template.message,
+                                    lastMessageType: chatMessage.template.headerType,
+                                    lastMessageTime: new Date(),
+                                    isBlocked: false,
+                                    intervene: false
+                                },
+                                $setOnInsert: {
+                                    utility: { id: null, expiration: null, cost: 0 },
+                                    marketing: { id: null, expiration: null, cost: 0 },
+                                    authentication: { id: null, expiration: null, cost: 0 },
+                                    service: { id: null, expiration: null, cost: 0 }
+                                }
+                            }
+                        },
+                        liveChatInsert: {
+                            data: chatMessage,
+                            sentBy: "system",
+                            messageRequestId: "",
+                            messageId: "",
+                            timestamp: "",
+                            wamid: null,
+                            status: "failed",
+                            error: {
+                                title: "Template is not allowed to send!",
+                                code: ""
+                            },
+                            erpType: "webengage",
+                            createdAt: new Date()
+                        }
+                    }
+                };
+            }
+        }
+
         if (savedTemplate?.status === "PAUSED") {
             console.log("Template is paused");
             return {
@@ -142,8 +196,8 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
                         messageId: "",
                         timestamp: "",
                         wamid: null,
-                        status:"failed",
-                        error : {
+                        status: "failed",
+                        error: {
                             title: "Template is Paused!",
                             code: ""
                         },
@@ -198,8 +252,8 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
                         messageId: "",
                         timestamp: "",
                         wamid: null,
-                        status:"failed",
-                        error : {
+                        status: "failed",
+                        error: {
                             title: "Message failed due to insufficient balance!",
                             code: ""
                         },
@@ -344,6 +398,19 @@ exports.fetchWhatsAppTemplate = async function ({ under, id, data }, dbConnectio
             if (savedTemplate?.status === "PAUSED") {
                 await db.collection(id + process.env.TEMPLATES_COLLECTION)
                     .updateOne({ name: data?.whatsAppData?.templateData?.templateName }, { $set: { status: "APPROVED" } })
+            }
+        }
+
+        const templateData = response?.template
+
+        // console.log(templateData, savedTemplate, "tempp");
+        if (templateData) {
+            if (templateData?.category && savedTemplate.type !== templateData?.category) {
+                await db
+                    .collection(id + process.env.TEMPLATES_COLLECTION)
+                    .updateOne({ templateId: savedTemplate.templateId }, { $set: { type: templateData?.category } })
+
+                console.log("updatedd template category");
             }
         }
 
