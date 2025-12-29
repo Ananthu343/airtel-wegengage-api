@@ -55,6 +55,9 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
                 ? process.env.SUPER_ADMIN_DB
                 : under + process.env.RESELLER_DB
         );
+        const superAdminDb = dbConnection.db(process.env.SUPER_ADMIN_DB);
+        const resellerId = under === "super_admin" ? "668f8408d0945a05ce55d861" : under
+
         if (!isValidObjectId(id)) {
             console.log("Not a valid userId");
             return {
@@ -67,11 +70,13 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
             };
         };
         // Parallelize initial queries
-        const [savedTemplate, user] = await Promise.all([
+        const [savedTemplate, user, reseller] = await Promise.all([
             db.collection(id + process.env.TEMPLATES_COLLECTION)
                 .findOne({ name: data?.whatsAppData?.templateData?.templateName || "" }),
             db.collection("users")
-                .findOne({ _id: ObjectId.createFromHexString(id) })
+                .findOne({ _id: ObjectId.createFromHexString(id) }),
+            superAdminDb.collection("resellers")
+                .findOne({ _id: ObjectId.createFromHexString(resellerId) })
         ]);
 
         if (!user) {
@@ -273,7 +278,7 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
             const response = await axios.post(process.env.SEND_MESSAGE_API, apiMessage, {
                 headers: {
                     "Content-Type": "application/json",
-                    Authorization: `Basic ${Buffer.from(`${process.env.API_USERNAME}:${process.env.API_PASSWORD}`).toString("base64")}`
+                    Authorization: `Basic ${Buffer.from(`${reseller?.embeddedConfig?.apiUsername || process.env.API_USERNAME}:${reseller?.embeddedConfig?.apiPassword || process.env.API_PASSWORD}`).toString("base64")}`
                 },
                 // timeout: 5000
             });
@@ -364,24 +369,30 @@ exports.fetchWhatsAppTemplate = async function ({ under, id, data }, dbConnectio
                 ? process.env.SUPER_ADMIN_DB
                 : under + process.env.RESELLER_DB)
 
-        const [savedTemplate, user] = await Promise.all([
+        const superAdminDb = dbConnection.db(process.env.SUPER_ADMIN_DB);
+        const resellerId = under === "super_admin" ? "668f8408d0945a05ce55d861" : under        
+
+        const [savedTemplate, user, reseller] = await Promise.all([
             db.collection(id + process.env.TEMPLATES_COLLECTION)
                 .findOne({ name: data?.whatsAppData?.templateData?.templateName || "" }),
             db.collection("users")
-                .findOne({ _id: ObjectId.createFromHexString(id) })
+                .findOne({ _id: ObjectId.createFromHexString(id) }),
+            superAdminDb.collection("resellers")
+                .findOne({ _id: ObjectId.createFromHexString(resellerId) })
         ]);
-
+        
         const params = {
-            customerId: process.env.CUSTOMER_ID,
-            subAccountId: process.env.SUB_ACCOUNT_ID,
+            customerId: reseller?.embeddedConfig?.customerId || process.env.CUSTOMER_ID,
+            subAccountId: reseller?.embeddedConfig?.subAccountId || process.env.SUB_ACCOUNT_ID,
             wabaId: user?.wabaId,
             templateId: savedTemplate?.templateId
         };
-
+        
         const headers = {
             'Content-Type': 'application/json',
-            Authorization: `Basic ${Buffer.from(`${process.env.API_USERNAME}:${process.env.API_PASSWORD}`).toString("base64")}`
+            Authorization: `Basic ${Buffer.from(`${reseller?.embeddedConfig?.apiUsername || process.env.API_USERNAME}:${reseller?.embeddedConfig?.apiPassword || process.env.API_PASSWORD}`).toString("base64")}`
         };
+        
 
         let response = await axios.get(url, {
             params,
