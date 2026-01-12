@@ -116,7 +116,7 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
             if (!user?.allowedTemplateTypes.includes(savedTemplate.type?.toLowerCase())) {
                 return {
                     savedError: {
-                        code: "TEMPLATE_NOT_FOUND",
+                        code: "TEMPLATE_NOT_ALLOWED",
                         message: "Template is not allowed to send",
                         timestamp,
                         messageId

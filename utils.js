@@ -6,8 +6,8 @@ function getErrorResponse(error) {
     
     const baseResponse = {
         version: "1.0",
-        status: "whatsapp_rejected",
-        statusCode: 2019,
+        status: "whatsapp_failed",
+        statusCode: 2009,
         message: error.message || "The message format is invalid",
         timestamp: error.timestamp || new Date().toISOString(),
         messageId: error.messageId || null
