@@ -10,7 +10,8 @@ function getErrorResponse(error) {
         statusCode: 2009,
         message: error.message || "The message format is invalid",
         timestamp: error.timestamp || new Date().toISOString(),
-        messageId: error.messageId || null
+        messageId: error.messageId || null,
+        toNumber: error.toNumber || null
     };
     
     switch (error.code) {

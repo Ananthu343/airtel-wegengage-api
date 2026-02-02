@@ -48,6 +48,7 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
     console.log("Processing handlewebengage");
     const timestamp = data?.metadata?.timestamp;
     const messageId = data?.metadata?.messageId;
+    const toNumber  = data?.whatsAppData?.toNumber;
 
     try {
         const db = dbConnection.db(
@@ -65,7 +66,8 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
                     code: "UNAUTHORIZED",
                     message: "User not found",
                     timestamp,
-                    messageId
+                    messageId,
+                    toNumber
                 }
             };
         };
@@ -86,7 +88,8 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
                     code: "UNAUTHORIZED",
                     message: "User not found",
                     timestamp,
-                    messageId
+                    messageId,
+                    toNumber
                 }
             };
         };
@@ -99,7 +102,8 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
                     code: "TEMPLATE_NOT_FOUND",
                     message: "Template not found in collection",
                     timestamp,
-                    messageId
+                    messageId,
+                    toNumber
                 }
             };
         };
@@ -119,7 +123,8 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
                         code: "TEMPLATE_NOT_ALLOWED",
                         message: "Template is not allowed to send",
                         timestamp,
-                        messageId
+                        messageId,
+                        toNumber
                     },
                     dbOps: {
                         under,
@@ -147,8 +152,8 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
                             data: chatMessage,
                             sentBy: "system",
                             messageRequestId: "",
-                            messageId: "",
-                            timestamp: "",
+                            messageId: messageId,
+                            timestamp: timestamp,
                             wamid: null,
                             status: "failed",
                             error: {
@@ -170,7 +175,8 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
                     code: "TEMPLATE_NOT_FOUND",
                     message: "Template is Paused",
                     timestamp,
-                    messageId
+                    messageId,
+                    toNumber
                 },
                 dbOps: {
                     under,
@@ -198,8 +204,8 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
                         data: chatMessage,
                         sentBy: "system",
                         messageRequestId: "",
-                        messageId: "",
-                        timestamp: "",
+                        messageId: messageId,
+                        timestamp: timestamp,
                         wamid: null,
                         status: "failed",
                         error: {
@@ -226,7 +232,8 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
                     code: "INSUFFICIENT_BALANCE",
                     message: "User has insufficient balance",
                     timestamp,
-                    messageId
+                    messageId,
+                    toNumber
                 },
                 dbOps: {
                     under,
@@ -254,8 +261,8 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
                         data: chatMessage,
                         sentBy: "system",
                         messageRequestId: "",
-                        messageId: "",
-                        timestamp: "",
+                        messageId: messageId,
+                        timestamp: timestamp,
                         wamid: null,
                         status: "failed",
                         error: {
