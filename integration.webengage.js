@@ -48,7 +48,7 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
     console.log("Processing handlewebengage");
     const timestamp = data?.metadata?.timestamp;
     const messageId = data?.metadata?.messageId;
-    const toNumber  = data?.whatsAppData?.toNumber;
+    const toNumber = data?.whatsAppData?.toNumber;
 
     try {
         const db = dbConnection.db(
@@ -110,13 +110,18 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
 
 
         // Process message
-        const apiMessage = buildApiMessage(savedTemplate.templateId, data, user);
+        let apiMessage;
+        if (user?.bspModel != "helloAi") {
+            apiMessage = buildApiMessage(savedTemplate.templateId, data, user);
+        } else {
+            apiMessage = buildSendMessage(savedTemplate.templateId, data, user);
+        }
         const chatMessage = buildChatMessage(savedTemplate, data);
         console.log("chat message converted!");
 
         if (user?.allowedTemplateTypes) {
             // console.log("yo", savedTemplate, user);
-            
+
             if (!user?.allowedTemplateTypes.includes(savedTemplate.type?.toLowerCase())) {
                 return {
                     savedError: {
@@ -282,17 +287,29 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
         let apiStartTime, apiEndTime, apiResponseTime;
         try {
             apiStartTime = Date.now();
-            const response = await axios.post(process.env.SEND_MESSAGE_API, apiMessage, {
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Basic ${Buffer.from(`${reseller?.embeddedConfig?.apiUsername || process.env.API_USERNAME}:${reseller?.embeddedConfig?.apiPassword || process.env.API_PASSWORD}`).toString("base64")}`
-                },
-                // timeout: 5000
-            });
+            let response;
+            if (user?.bspModel != "helloAi") {
+                response = await axios.post(process.env.SEND_MESSAGE_API, apiMessage, {
+                    headers: {
+                        "Content-Type": "application/json",
+                        Authorization: `Basic ${Buffer.from(`${reseller?.embeddedConfig?.apiUsername || process.env.API_USERNAME}:${reseller?.embeddedConfig?.apiPassword || process.env.API_PASSWORD}`).toString("base64")}`
+                    },
+                    // timeout: 5000
+                });
+            } else {
+                const token = reseller?.embeddedConfig?.helloAiToken;
+                response = await axios.post(process.env.HELLOAI_SEND_MESSAGE_API, apiMessage, {
+                    headers: {
+                        "Content-Type": "application/json",
+                        Authorization: `Bearer ${token}`,
+                    },
+                    // timeout: 5000
+                });
+            }
             apiEndTime = Date.now();
             apiResponseTime = apiEndTime - apiStartTime;
 
-            messageRequestId = response.data?.messageRequestId;
+            messageRequestId = response.data?.messageRequestId || response?.data?.data?.response?.messageId;
         } catch (err) {
             apiEndTime = Date.now();
             apiResponseTime = apiEndTime - apiStartTime;
@@ -314,7 +331,7 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
         //         code: err?.response?.data?.code || null,
         //     };
         // }
-        console.log("Airtel api processed sucessfully, error:", error, `response time: ${apiResponseTime} ms`);
+        console.log("Api processed sucessfully, error:", error, `response time: ${apiResponseTime} ms`);
 
         return {
             savedError: error,
@@ -369,7 +386,7 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
 
 exports.fetchWhatsAppTemplate = async function ({ under, id, data }, dbConnection) {
     try {
-        const url = 'https://iqwhatsapp.airtel.in/gateway/airtel-xchange/whatsapp-content-manager/v1/template';
+        let url = 'https://iqwhatsapp.airtel.in/gateway/airtel-xchange/whatsapp-content-manager/v1/template';
 
         const db = dbConnection.db(
             under === "super_admin"
@@ -377,7 +394,7 @@ exports.fetchWhatsAppTemplate = async function ({ under, id, data }, dbConnectio
                 : under + process.env.RESELLER_DB)
 
         const superAdminDb = dbConnection.db(process.env.SUPER_ADMIN_DB);
-        const resellerId = under === "super_admin" ? "668f8408d0945a05ce55d861" : under        
+        const resellerId = under === "super_admin" ? "668f8408d0945a05ce55d861" : under
 
         const [savedTemplate, user, reseller] = await Promise.all([
             db.collection(id + process.env.TEMPLATES_COLLECTION)
@@ -387,29 +404,38 @@ exports.fetchWhatsAppTemplate = async function ({ under, id, data }, dbConnectio
             superAdminDb.collection("resellers")
                 .findOne({ _id: ObjectId.createFromHexString(resellerId) })
         ]);
-        
-        const params = {
-            customerId: reseller?.embeddedConfig?.customerId || process.env.CUSTOMER_ID,
-            subAccountId: reseller?.embeddedConfig?.subAccountId || process.env.SUB_ACCOUNT_ID,
-            wabaId: user?.wabaId,
-            templateId: savedTemplate?.templateId
-        };
-        
-        const headers = {
-            'Content-Type': 'application/json',
-            Authorization: `Basic ${Buffer.from(`${reseller?.embeddedConfig?.apiUsername || process.env.API_USERNAME}:${reseller?.embeddedConfig?.apiPassword || process.env.API_PASSWORD}`).toString("base64")}`
-        };
-        
 
-        let response = await axios.get(url, {
-            params,
-            headers
-        });
+        let response;
+        if (user?.bspModel != "helloAi") {
+            const params = {
+                customerId: reseller?.embeddedConfig?.customerId || process.env.CUSTOMER_ID,
+                subAccountId: reseller?.embeddedConfig?.subAccountId || process.env.SUB_ACCOUNT_ID,
+                wabaId: user?.wabaId,
+                templateId: savedTemplate?.templateId
+            };
+            const headers = {
+                'Content-Type': 'application/json',
+                Authorization: `Basic ${Buffer.from(`${reseller?.embeddedConfig?.apiUsername || process.env.API_USERNAME}:${reseller?.embeddedConfig?.apiPassword || process.env.API_PASSWORD}`).toString("base64")}`
+            };
+            response = await axios.get(url, {
+                params,
+                headers
+            });
+        } else {
+            const token = reseller?.embeddedConfig?.helloAiToken;
+            headers = {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`,
+            }
+            url = `${process.env.HELLOAI_TEMPLATE_INFO}/${savedTemplate?.templateId}/${user?.wabaId}`;
+            response = await axios.get(url, {
+                headers
+            });
+        }
+        const templateData = response?.template
+        response = response.data?.template?.status ?? response.data?.data?.details?.lastStatus;
 
-        response = response.data;
-
-        console.log(response.template.status, "template response");
-        if (response?.template?.status && response?.template?.status === "INACTIVE") {
+        if (response && response === "INACTIVE") {
             await db.collection(id + process.env.TEMPLATES_COLLECTION)
                 .updateOne({ name: data?.whatsAppData?.templateData?.templateName }, { $set: { status: "PAUSED" } })
         } else {
@@ -418,8 +444,6 @@ exports.fetchWhatsAppTemplate = async function ({ under, id, data }, dbConnectio
                     .updateOne({ name: data?.whatsAppData?.templateData?.templateName }, { $set: { status: "APPROVED" } })
             }
         }
-
-        const templateData = response?.template
 
         // console.log(templateData, savedTemplate, "tempp");
         if (templateData) {
@@ -512,6 +536,84 @@ const buildApiMessage = (templateId, message, user) => {
     return apiMessage;
 };
 
+const buildSendMessage = (template, message, user) => {
+    const components = [];
+    const isAuth = template?.type?.toUpperCase() === "AUTHENTICATION";
+
+    if (isAuth) {
+        const otp = message?.template?.components?.find(c => c.type === "BODY")
+            ?.parameters?.[0]?.text;
+
+        components.push(
+            {
+                type: "body",
+                parameters: [
+                    {
+                        type: "text",
+                        text: otp,
+                    },
+                ],
+            },
+            {
+                type: "button",
+                sub_type: "url",
+                index: "0",
+                parameters: [
+                    {
+                        type: "text",
+                        text: otp,
+                    },
+                ],
+            }
+        );
+    }
+
+    if (!isAuth && message.template?.components) {
+        const incomingComponents = [...message.template.components];
+
+        const hasBody = incomingComponents.some(
+            c => c.type?.toUpperCase() === "BODY"
+        );
+
+        if (!hasBody) {
+            incomingComponents.unshift({ type: "BODY" });
+        }
+
+        incomingComponents.forEach(component => {
+            const helloAiComponent = _mapComponentToHelloAi(component);
+            if (helloAiComponent) {
+                components.push(helloAiComponent);
+            }
+        });
+    }
+    const payload = {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: message.whatsAppData.toNumber,
+        type: "template",
+        from:
+            user.businessWhatsappNumber,
+        check_consent: isAuth ? "true" : "false",
+        template: {
+            name: template.name || message.template?.name||message.whatsAppData.templateData.templateName,
+            category: isAuth
+                ? "AUTHENTICATION"
+                : template.type?.toUpperCase() || "UTILITY",
+            language: {
+                code: template.language || "en",
+            },
+            components: components.length > 0 ? components : [{ type: "body" }],
+        },
+    };
+
+    if (message.campaignId) {
+        payload.campaign_name = message.campaignId;
+    }
+
+    return payload;
+}
+
+
 const buildChatMessage = (template, message) => {
     const regex = /{{(.*?)}}/;
     const whatsAppData = message.whatsAppData;
@@ -603,3 +705,133 @@ const buildChatMessage = (template, message) => {
         template: chatMessage
     };
 };
+
+const _mapComponentToHelloAi = (component) => {
+    switch (component?.type?.toUpperCase()) {
+        case "HEADER": {
+            const paramType = component.parameters?.[0]?.type?.toLowerCase();
+
+            if (!paramType) return null;
+
+            if (paramType === "text") {
+                return {
+                    type: "header",
+                    parameters: [
+                        {
+                            type: "text",
+                            text: component.parameters[0].text,
+                        },
+                    ],
+                };
+            }
+            if (paramType === "image") {
+                return {
+                    type: "header",
+                    parameters: [
+                        {
+                            type: "image",
+                            image: { link: component.parameters[0].image?.link },
+                        },
+                    ],
+                };
+            }
+            if (paramType === "video") {
+                return {
+                    type: "header",
+                    parameters: [
+                        {
+                            type: "video",
+                            video: { link: component.parameters[0].video?.link },
+                        },
+                    ],
+                };
+            }
+            if (paramType === "document") {
+                return {
+                    type: "header",
+                    parameters: [
+                        {
+                            type: "document",
+                            document: {
+                                link: component.parameters[0].document?.link,
+                                filename: component.parameters[0].document.filename,
+                            },
+                        },
+                    ],
+                };
+            }
+
+            return null;
+        }
+        case "BODY":
+            if (component.parameters && component.parameters.length > 0) {
+                return {
+                    type: "body",
+                    parameters: component.parameters.map(param => ({
+                        type: "text",
+                        text: param.text,
+                    })),
+                };
+            }
+            return { type: "body" };
+
+        case "BUTTON":
+            if (
+                component.sub_type.toUpperCase() === "QUICK_REPLY" &&
+                component.parameters.some(param => param.payload)
+            ) {
+                return {
+                    type: "button",
+                    sub_type: "quick_reply",
+                    index: component.index || 0,
+                    ...(component.parameters.some(param => param.payload) && {
+                        parameters:
+                            component.parameters?.map(param => ({
+                                type: param.type,
+                                [param.type]: param.payload || param.text,
+                            })) || [],
+                    }),
+                };
+            } else if (
+                component.sub_type.toUpperCase() === "URL" &&
+                component.parameters.some(param => param.text)
+            ) {
+                return {
+                    type: "button",
+                    sub_type: "url",
+                    index: component.index ?? 0,
+                    ...(component.parameters.some(param => param.text) && {
+                        parameters:
+                            component.parameters?.map(param => ({
+                                type: "text",
+                                text: param.text || "",
+                            })) || [],
+                    }),
+                };
+            }
+        // else if (component.sub_type.toUpperCase() === "PHONE_NUMBER") {
+        //   return {
+        //     type: "button",
+        //     sub_type: "PHONE_NUMBER",
+        //     index: String(component.index || 0),
+        //   };
+        // }
+        // return null;
+        case "CAROUSEL": {
+            if (!Array.isArray(component.cards)) return null;
+
+            return {
+                type: "carousel",
+                cards: component.cards.map((card, cardIndex) => ({
+                    card_index:
+                        card.card_index !== null && card.card_index !== undefined
+                            ? card.card_index
+                            : cardIndex,
+                    components: card.components
+                        .map(inner => this._mapComponentToHelloAi(inner))
+                        .filter(Boolean),
+                })),
+            };
+        }
+    }
+}
