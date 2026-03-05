@@ -114,7 +114,7 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
         if (user?.bspModel != "helloAi") {
             apiMessage = buildApiMessage(savedTemplate.templateId, data, user);
         } else {
-            apiMessage = buildSendMessage(savedTemplate.templateId, data, user);
+            apiMessage = buildSendMessage(savedTemplate, data, user);
         }
         const chatMessage = buildChatMessage(savedTemplate, data);
         console.log("chat message converted!");
@@ -310,6 +310,7 @@ exports.handleWebengage = async function ({ under, id, data }, dbConnection) {
             apiResponseTime = apiEndTime - apiStartTime;
 
             messageRequestId = response.data?.messageRequestId || response?.data?.data?.response?.messageId;
+            console.log("Message sent successfully, messageRequestId:", messageRequestId);
         } catch (err) {
             apiEndTime = Date.now();
             apiResponseTime = apiEndTime - apiStartTime;
@@ -525,6 +526,38 @@ const buildApiMessage = (templateId, message, user) => {
         }
     }
 
+    if (templateData.type === "CAROUSEL") {
+        templateData.carousel.cards.forEach((card, index) => {
+            const carouselCard = {
+                index: index,
+                carouselMediaUrl: card.header?.mediaUrl || "",
+                carouselMediaType: card.header?.type?.toUpperCase() || "IMAGE",
+                carouselButtons: [],
+                carouselBodyVariables: card.placeholders?.map(text => ({ type: "text", text })) || [],
+            };
+
+            // Add URL button if buttonUrlParam exists
+            if (card.buttonUrlParam) {
+                carouselCard.carouselButtons.push({
+                    index: "0",
+                    type: "URL",
+                    payload: card.buttonUrlParam,
+                });
+            }
+            if (card.buttonUrlDynamicParam) {
+                carouselCard.carouselButtons.push({
+                    index: "1",
+                    type: "URL",
+                    payload: card.buttonUrlDynamicParam,    
+                });
+            }
+
+            apiMessage.message.carouselCard.push(carouselCard);
+        });
+
+        return apiMessage;
+    }
+
     // Handle authentication template type
     if (templateData.type === 'AUTHENTICATION') {
         if (templateData.templateVariables && templateData.templateVariables.length > 0) {
@@ -532,73 +565,192 @@ const buildApiMessage = (templateId, message, user) => {
         }
     }
 
-    console.log(JSON.stringify(apiMessage, null, 2), "converted apiMessage");
     return apiMessage;
 };
 
 const buildSendMessage = (template, message, user) => {
+    const whatsAppData = message.whatsAppData;
+    const templateData = whatsAppData.templateData;
     const components = [];
-    const isAuth = template?.type?.toUpperCase() === "AUTHENTICATION";
+    const isAuth = templateData.type === 'AUTHENTICATION';
 
     if (isAuth) {
-        const otp = message?.template?.components?.find(c => c.type === "BODY")
-            ?.parameters?.[0]?.text;
+        if (templateData.templateVariables && templateData.templateVariables.length > 0) {
+            const otp = templateData.templateVariables[0];
+            components.push(
+                {
+                    type: "body",
+                    parameters: [
+                        {
+                            type: "text",
+                            text: otp,
+                        },
+                    ],
+                },
+                {
+                    type: "button",
+                    sub_type: "url",
+                    index: "0",
+                    parameters: [
+                        {
+                            type: "text",
+                            text: otp,
+                        },
+                    ],
+                }
+            );
+        }
+    }
+    if (!isAuth && templateData) {
 
-        components.push(
-            {
+        if (templateData.mediaUrl) {
+            switch (templateData.type) {
+                case 'TEXT':
+                    components.push({
+                        type: "header",
+                        parameters: [
+                            {
+                                type: "text",
+                                text: templateData.mediaUrl || "text",
+                            },
+                        ],
+                    });
+                    break;
+                case 'IMAGE':
+                    components.push({
+                        type: "header",
+                        parameters: [
+                            {
+                                type: "image",
+                                image: { link: templateData.mediaUrl },
+                            },
+                        ],
+                    });
+                    break;
+                case 'VIDEO':
+                    components.push({
+                        type: "header",
+                        parameters: [
+                            {
+                                type: "video",
+                                video: { link: templateData.mediaUrl },
+                            },
+                        ],
+                    });
+                    break;
+                case 'DOCUMENT':
+                    components.push({
+                        type: "header",
+                        parameters: [
+                            {
+                                type: "document",
+                                document: {
+                                    link: templateData.mediaUrl,
+                                    filename: templateData.fileName || templateData.buttonUrlParam || "Document"
+                                },
+                            },
+                        ],
+                    });
+                    break;
+            }
+        }
+        if (templateData.templateVariables && templateData.templateVariables.length > 0) {
+            components.push({
                 type: "body",
-                parameters: [
-                    {
-                        type: "text",
-                        text: otp,
-                    },
-                ],
-            },
-            {
+                parameters: templateData.templateVariables.map(variable => ({
+                    type: "text",
+                    text: variable,
+                })),
+            });
+        } else {
+            components.push({ type: "body" });
+        }
+        if (templateData.buttonUrlParam) {
+            components.push({
                 type: "button",
                 sub_type: "url",
                 index: "0",
-                parameters: [
-                    {
-                        type: "text",
-                        text: otp,
-                    },
-                ],
-            }
-        );
-    }
-
-    if (!isAuth && message.template?.components) {
-        const incomingComponents = [...message.template.components];
-
-        const hasBody = incomingComponents.some(
-            c => c.type?.toUpperCase() === "BODY"
-        );
-
-        if (!hasBody) {
-            incomingComponents.unshift({ type: "BODY" });
+                ...(templateData.buttonUrlParam && {
+                    parameters: [
+                        {
+                            type: "text",
+                            text: templateData.buttonUrlParam,
+                        },
+                    ]
+                })
+            });
         }
-
-        incomingComponents.forEach(component => {
-            const helloAiComponent = _mapComponentToHelloAi(component);
-            if (helloAiComponent) {
-                components.push(helloAiComponent);
-            }
-        });
+        if (templateData.buttonUrlDynamicParam) {
+            components.push({
+                type: "button",
+                sub_type: "url",
+                index: "1",
+                ...(templateData.buttonUrlDynamicParam && {
+                    parameters: [
+                        {
+                            type: "text",
+                            text: templateData.buttonUrlDynamicParam,
+                        },
+                    ]
+                })
+            });
+        }
+        if (templateData.type === "CAROUSEL") {
+            components.push({
+                type: "carousel",
+                cards: templateData.carousel?.cards?.map((card, cardIndex) => ({
+                    card_index: cardIndex,
+                    components: [
+                        card.header && {
+                            type: "header",
+                            parameters: [{
+                                type: card.header.type?.toLowerCase(),
+                                [card.header.type?.toLowerCase()]: { link: card.header.mediaUrl }
+                            }]
+                        },
+                        card.placeholders?.length > 0 && {
+                            type: "body",
+                            parameters: card.placeholders.map(text => ({ type: "text", text }))
+                        },
+                        card.buttonUrlParam && {
+                            type: "button",
+                            sub_type: "url",
+                            index: 0,
+                            parameters: [{ type: "text", text: card.buttonUrlParam }]
+                        },
+                        card.buttonUrlDynamicParam && {
+                            type: "button",
+                            sub_type: "url",
+                            index: 1,
+                            parameters: [{ type: "text", text: card.buttonUrlDynamicParam }]
+                        },
+                        // {
+                        //     type: "button",
+                        //     sub_type: "quick_reply",
+                        //     index: 0,
+                        //     parameters: [
+                        //         {
+                        //             type: "payload",
+                        //             payload: "CAMP-24546"
+                        //         }
+                        //     ]
+                        // }
+                    ].filter(Boolean)
+                }))
+            });
+        }
     }
+
     const payload = {
         messaging_product: "whatsapp",
         recipient_type: "individual",
         to: message.whatsAppData.toNumber,
         type: "template",
-        from:
-            user.businessWhatsappNumber,
+        from: user.businessWhatsappNumber,
         check_consent: isAuth ? "true" : "false",
         template: {
-            name: template.name || message.template?.name||message.whatsAppData.templateData.templateName,
-            category: isAuth
-                ? "AUTHENTICATION"
-                : template.type?.toUpperCase() || "UTILITY",
+            name: templateData.templateName,
+            category: template.type?.toUpperCase() || "UTILITY",
             language: {
                 code: template.language || "en",
             },
@@ -609,7 +761,6 @@ const buildSendMessage = (template, message, user) => {
     if (message.campaignId) {
         payload.campaign_name = message.campaignId;
     }
-
     return payload;
 }
 
@@ -705,133 +856,3 @@ const buildChatMessage = (template, message) => {
         template: chatMessage
     };
 };
-
-const _mapComponentToHelloAi = (component) => {
-    switch (component?.type?.toUpperCase()) {
-        case "HEADER": {
-            const paramType = component.parameters?.[0]?.type?.toLowerCase();
-
-            if (!paramType) return null;
-
-            if (paramType === "text") {
-                return {
-                    type: "header",
-                    parameters: [
-                        {
-                            type: "text",
-                            text: component.parameters[0].text,
-                        },
-                    ],
-                };
-            }
-            if (paramType === "image") {
-                return {
-                    type: "header",
-                    parameters: [
-                        {
-                            type: "image",
-                            image: { link: component.parameters[0].image?.link },
-                        },
-                    ],
-                };
-            }
-            if (paramType === "video") {
-                return {
-                    type: "header",
-                    parameters: [
-                        {
-                            type: "video",
-                            video: { link: component.parameters[0].video?.link },
-                        },
-                    ],
-                };
-            }
-            if (paramType === "document") {
-                return {
-                    type: "header",
-                    parameters: [
-                        {
-                            type: "document",
-                            document: {
-                                link: component.parameters[0].document?.link,
-                                filename: component.parameters[0].document.filename,
-                            },
-                        },
-                    ],
-                };
-            }
-
-            return null;
-        }
-        case "BODY":
-            if (component.parameters && component.parameters.length > 0) {
-                return {
-                    type: "body",
-                    parameters: component.parameters.map(param => ({
-                        type: "text",
-                        text: param.text,
-                    })),
-                };
-            }
-            return { type: "body" };
-
-        case "BUTTON":
-            if (
-                component.sub_type.toUpperCase() === "QUICK_REPLY" &&
-                component.parameters.some(param => param.payload)
-            ) {
-                return {
-                    type: "button",
-                    sub_type: "quick_reply",
-                    index: component.index || 0,
-                    ...(component.parameters.some(param => param.payload) && {
-                        parameters:
-                            component.parameters?.map(param => ({
-                                type: param.type,
-                                [param.type]: param.payload || param.text,
-                            })) || [],
-                    }),
-                };
-            } else if (
-                component.sub_type.toUpperCase() === "URL" &&
-                component.parameters.some(param => param.text)
-            ) {
-                return {
-                    type: "button",
-                    sub_type: "url",
-                    index: component.index ?? 0,
-                    ...(component.parameters.some(param => param.text) && {
-                        parameters:
-                            component.parameters?.map(param => ({
-                                type: "text",
-                                text: param.text || "",
-                            })) || [],
-                    }),
-                };
-            }
-        // else if (component.sub_type.toUpperCase() === "PHONE_NUMBER") {
-        //   return {
-        //     type: "button",
-        //     sub_type: "PHONE_NUMBER",
-        //     index: String(component.index || 0),
-        //   };
-        // }
-        // return null;
-        case "CAROUSEL": {
-            if (!Array.isArray(component.cards)) return null;
-
-            return {
-                type: "carousel",
-                cards: component.cards.map((card, cardIndex) => ({
-                    card_index:
-                        card.card_index !== null && card.card_index !== undefined
-                            ? card.card_index
-                            : cardIndex,
-                    components: card.components
-                        .map(inner => this._mapComponentToHelloAi(inner))
-                        .filter(Boolean),
-                })),
-            };
-        }
-    }
-}
